@@ -1,0 +1,4 @@
+data/*
+output/*
+scene/__pycache__/*
+submodules/*

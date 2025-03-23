@@ -38,9 +38,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.encodings import get_binary_vxl_size
 
-
 # torch.set_num_threads(32)
-
 lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
 
 bit2MB_scale = 8 * 1024 * 1024
@@ -175,7 +173,7 @@ def training(args_param, dataset, opt, pipe, dataset_name, testing_iterations, s
         Ll1 = l1_loss(image, gt_image)
 
         ssim_loss = (1.0 - ssim(image, gt_image))
-        scaling_reg = 0.0 if args_param.fix_scaling_bug else scaling.prod(dim=1).mean()
+        scaling_reg = scaling.prod(dim=1).mean()
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
 
         if bit_per_param is not None:
@@ -620,7 +618,6 @@ if __name__ == "__main__":
     parser.add_argument("--n_features", type=int, default = 4)
     parser.add_argument("--lmbda_list", nargs="+", type=float, default = [4, 2, 0.25])
     parser.add_argument("--lmbda", type=float, default = 0.001)
-    parser.add_argument("--fix_scaling_bug", action="store_true", help="Fix the scaling.prod bug")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     args.test_iterations.append(args.iterations)
