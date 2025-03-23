@@ -41,6 +41,22 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     bit_per_offsets_param = None
 
     if is_training:
+        # Apply SOA enhancement if enabled and past initial training stage
+        if pc.use_soa and step > 3000:
+            # Calculate feature enhancements using SOA
+            augmented_features = []
+            for i in range(pc.soa_m):
+                eigen_projection = torch.matmul(feat, pc.soa_top_eigenvectors[:,i:i+1])  # [N, 1]
+                combined = torch.cat([feat, eigen_projection.expand(-1, pc.feat_dim)], dim=-1)  # [N, 2D]
+                enhanced_feat = pc.soa_mlp[i](combined)  # [N, D]
+                augmented_features.append(enhanced_feat)
+            
+            # Store original features for quantization
+            orig_feat = feat.clone()
+            
+            # Use enhanced features for rendering, but quantize original ones
+            feat = feat + sum(augmented_features) / pc.soa_m
+        
         if step > 3000 and step <= 10000:
             # quantization
             feat = feat + torch.empty_like(feat).uniform_(-0.5, 0.5) * 1
@@ -49,6 +65,11 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
 
         if step == 10000:
             pc.update_anchor_bound()
+            
+            # First update of SOA components
+            if pc.use_soa:
+                with torch.no_grad():
+                    pc.update_second_order_components(pc._anchor_feat)
 
         if step > 10000:
             # for rendering
@@ -60,6 +81,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             Q_feat_basic = 1 * (1 + torch.tanh(Q_feat_adj.contiguous()))
             Q_scaling_basic = 0.001 * (1 + torch.tanh(Q_scaling_adj.contiguous()))
 
+            # Adjust quantization based on level - sharper quantization for higher levels
             Q_feat = Q_feat_basic / (3 ** pc.current_lmbda_idx)
             Q_scaling = Q_scaling_basic / (3 ** pc.current_lmbda_idx)
             Q_offsets = 0.2 * (1 + torch.tanh(Q_offsets_adj))
@@ -157,9 +179,19 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
         grid_offsets = (STE_multistep.apply(grid_offsets, Q_offsets, pc._offset.mean())).detach()
 
         torch.cuda.synchronize(); time_sub = time.time() - t1
-
     else:
-        pass
+        # If using SOA in decoded version
+        if pc.use_soa:
+            # Calculate feature enhancements using SOA
+            augmented_features = []
+            for i in range(pc.soa_m):
+                eigen_projection = torch.matmul(feat, pc.soa_top_eigenvectors[:,i:i+1])  # [N, 1]
+                combined = torch.cat([feat, eigen_projection.expand(-1, pc.feat_dim)], dim=-1)  # [N, 2D]
+                enhanced_feat = pc.soa_mlp[i](combined)  # [N, D]
+                augmented_features.append(enhanced_feat)
+            
+            # Use enhanced features for rendering
+            feat = feat + sum(augmented_features) / pc.soa_m
 
     ob_view = anchor - viewpoint_camera.camera_center
     ob_dist = ob_view.norm(dim=1, keepdim=True)

@@ -99,6 +99,8 @@ def training(args_param, dataset, opt, pipe, dataset_name, testing_iterations, s
         is_synthetic_nerf=is_synthetic_nerf,
         lmbda_list = lmbda_list,
         lmbda_list_len = len(lmbda_list),
+        use_soa=args_param.use_soa,
+        soa_m=args_param.soa_m if hasattr(args_param, 'soa_m') else 2,
     )
     scene = Scene(dataset, gaussians, ply_path=ply_path)
     gaussians.update_anchor_bound()
@@ -243,6 +245,16 @@ def training(args_param, dataset, opt, pipe, dataset_name, testing_iterations, s
             if (iteration in checkpoint_iterations):
                 logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+        # Update SOA components periodically during training
+        if gaussians.use_soa and iteration % 1000 == 0 and iteration > 5000:
+            with torch.no_grad():
+                logger.info(f"\n[ITER {iteration}] Updating SOA components...")
+                gaussians.update_second_order_components(gaussians._anchor_feat)
+        
+        # Adjust feature dimensions based on compression level
+        if gaussians.use_soa:
+            gaussians.update_feature_dim(gaussians.current_lmbda_idx)
 
     torch.cuda.synchronize(); t_end = time.time()
     logger.info("\n Total Training time: {}".format(t_end-t_start-log_time_sub))
@@ -621,6 +633,8 @@ if __name__ == "__main__":
     parser.add_argument("--lmbda_list", nargs="+", type=float, default = [4, 2, 0.25])
     parser.add_argument("--lmbda", type=float, default = 0.001)
     parser.add_argument("--fix_scaling_bug", action="store_true", help="Fix the scaling.prod bug")
+    parser.add_argument("--use_soa", action="store_true", help="Enable Second-Order Anchor enhancements")
+    parser.add_argument("--soa_m", type=int, default=2, help="Number of principal components for SOA")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     args.test_iterations.append(args.iterations)

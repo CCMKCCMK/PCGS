@@ -417,6 +417,8 @@ class GaussianModel(nn.Module):
                  is_synthetic_nerf: bool = False,
                  lmbda_list=(1, 2, 4),
                  lmbda_list_len: int = 1,
+                 use_soa: bool = False,
+                 soa_m: int = 2,
                  ):
         super().__init__()
         print('hash_params:', use_2D, n_features_per_level,
@@ -436,6 +438,22 @@ class GaussianModel(nn.Module):
 
         self.register_buffer("x_bound_min", x_bound_min)
         self.register_buffer("x_bound_max", x_bound_max)
+
+        # SOA related parameters
+        self.use_soa = use_soa
+        self.soa_m = soa_m
+        self.orig_feat_dim = feat_dim
+        self.effective_feat_dim = feat_dim
+        
+        if self.use_soa:
+            self.register_buffer("soa_top_eigenvectors", torch.zeros(feat_dim, soa_m, device='cuda'))
+            self.soa_mlp = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(2*feat_dim, feat_dim),
+                    nn.ReLU(True),
+                    nn.Linear(feat_dim, feat_dim)
+                ) for _ in range(self.soa_m)
+            ])
 
         self.n_features_per_level = n_features_per_level
         self.log2_hashmap_size = log2_hashmap_size
@@ -1892,4 +1910,54 @@ class GaussianModel(nn.Module):
                    f"ttl_time (w/head w/inc) {round(dec_time_ed_ttl[ss] - dec_time_st_ttl[ss], 6)}"
 
         return log_info
+
+    # Add these new methods for SOA functionality
+    def compute_second_order_stats(self, anchor_feats):
+        """Compute second-order statistics from feature vectors."""
+        # anchor_feats: [N, D]
+        if anchor_feats.shape[0] <= 1:
+            # Not enough samples to compute statistics
+            return torch.eye(self.feat_dim, self.soa_m, device=anchor_feats.device)
+            
+        mu = torch.mean(anchor_feats, dim=0, keepdim=True)  # [1, D]
+        centered = anchor_feats - mu  # [N, D]
+        covariance = (centered.T @ centered) / (centered.shape[0] - 1)  # [D, D]
+        
+        # Calculate correlation matrix
+        std = torch.sqrt(torch.diag(covariance) + 1e-8)  # [D]
+        inv_std = torch.diag(1.0/std)  # [D, D]
+        correlation = inv_std @ covariance @ inv_std  # [D, D]
+        
+        # Eigen decomposition
+        eigenvalues, eigenvectors = torch.linalg.eigh(correlation)
+        sorted_idx = torch.argsort(eigenvalues, descending=True)
+        top_eigenvectors = eigenvectors[:, sorted_idx[:self.soa_m]]  # [D, M]
+        
+        return top_eigenvectors
+        
+    def update_second_order_components(self, features):
+        """Update the second-order components using the current feature set."""
+        if not self.use_soa:
+            return
+            
+        # Subsample if there are too many features to avoid memory issues
+        max_samples = 10000
+        if features.shape[0] > max_samples:
+            indices = torch.randperm(features.shape[0], device=features.device)[:max_samples]
+            features = features[indices]
+            
+        top_eigenvectors = self.compute_second_order_stats(features)
+        self.soa_top_eigenvectors.copy_(top_eigenvectors)
+        
+    def update_feature_dim(self, current_level):
+        """Dynamically adjust effective feature dimension based on compression level."""
+        if not self.use_soa:
+            return
+            
+        if current_level == 0:
+            self.effective_feat_dim = self.orig_feat_dim
+        else:
+            # Reduce dimensions by 25% per level
+            self.effective_feat_dim = max(int(self.orig_feat_dim * (0.75**current_level)), 
+                                         self.orig_feat_dim // 4)  # Don't go below 25%
 
